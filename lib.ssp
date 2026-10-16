@@ -1,0 +1,1100 @@
+// lists: list utilities beyond the builtin List methods. Splitting, sliding windows, grouping,
+// counting, zips, order-preserving set operations, combinatorics, searching by key and total
+// (never trapping) index edits. Every function is pure; functions that take a lambda perform
+// whatever that lambda performs. Indexes are 0-based. Out-of-range indexes never trap: each
+// function documents what it does with them.
+
+// ---------- splitting ----------
+
+// `(xs.take(i), xs.drop(i))` with `i` clamped to `0..=xs.len`: a negative `i` gives `([], xs)`
+// and an `i` past the end gives `(xs, [])`.
+pub fn split_at[A](xs: List[A], i: Int) -> (List[A], List[A])
+  post r.0.len + r.1.len == xs.len
+= do
+  k = clamp(i, 0, xs.len)
+  (xs.take(k), xs.drop(k))
+
+fn prefix_len[A, e](xs: List[A], p: A -> Bool ! e) -> Int ! e
+= do
+  var n = 0
+  for x in xs
+    if not p(x) then return n
+    n := n + 1
+  n
+
+// The longest prefix whose elements all satisfy `p`, and the rest (Haskell's `span`). `p` is
+// called once per element of the prefix, plus once for the first element that fails.
+pub fn split_while[A, e](xs: List[A], p: A -> Bool ! e) -> (List[A], List[A]) ! e
+= split_at(xs, prefix_len(xs, p))
+
+// The longest prefix with no element satisfying `p`, and the rest, which starts with the first
+// element that does (Haskell's `break`).
+pub fn split_until[A, e](xs: List[A], p: A -> Bool ! e) -> (List[A], List[A]) ! e
+= split_at(xs, prefix_len(xs, x => not p(x)))
+
+fn slices_between[A](xs: List[A], cuts: List[Int]) -> List[List[A]]
+= do
+  bounds = [0] + cuts + [xs.len]
+  (0..bounds.len - 1).map(j => xs.slice(bounds[j], bounds[j + 1]))
+
+// Splits `xs` between every pair of neighbours `a, b` for which `p(a, b)` holds; no element is
+// lost. An empty list gives `[]`. `split_when([1, 2, 4, 5], (a, b) => b != a + 1)` is
+// `[[1, 2], [4, 5]]`.
+pub fn split_when[A, e](xs: List[A], p: (A, A) -> Bool ! e) -> List[List[A]] ! e
+= if xs.is_empty then [] else slices_between(xs, (1..xs.len).filter(i => p(xs[i - 1], xs[i])))
+
+fn split_at_seps[A](xs: List[A], seps: List[Int]) -> List[List[A]]
+= do
+  starts = [0] + seps.map(_ + 1)
+  ends = seps + [xs.len]
+  (0..starts.len).map(j => xs.slice(starts[j], ends[j]))
+
+// Splits `xs` at every element equal to `sep`, dropping the separators, like `Str.split`:
+// `[]` gives `[[]]`, and neighbouring or trailing separators give empty pieces, so the result
+// always has one more piece than there are separators.
+pub fn split_on[A](xs: List[A], sep: A) -> List[List[A]]
+  post r.len >= 1
+= split_at_seps(xs, (0..xs.len).filter(i => xs[i] == sep))
+
+// `split_on` with a predicate: splits at every element satisfying `p` and drops those elements.
+pub fn split_where[A, e](xs: List[A], p: A -> Bool ! e) -> List[List[A]] ! e
+= split_at_seps(xs, (0..xs.len).filter(i => p(xs[i])))
+
+// Exactly `n` consecutive parts whose lengths differ by at most one, the longer parts first
+// (more-itertools' `divide`). With fewer than `n` elements the last parts are empty.
+pub fn split_parts[A](xs: List[A], n: Int where _ >= 1) -> List[List[A]]
+  post r.len == n
+= do
+  q = xs.len / n
+  rem = xs.len % n
+  (0..n).map(j => xs.slice(j * q + min(j, rem), (j + 1) * q + min(j + 1, rem)))
+
+// Windows of `size` elements starting every `step` elements (Kotlin's `windowed`). With
+// `partial` false only full windows are returned; with `partial` true the windows that start
+// before the end but run past it are kept, shortened. `sliding(xs, n, 1, false)` is
+// `xs.windows(n)` and `sliding(xs, n, n, true)` is `xs.chunks(n)`.
+pub fn sliding[A](xs: List[A], size: Int where _ >= 1, step: Int where _ >= 1, partial: Bool) -> List[List[A]]
+  post r.all(w => w.len <= size)
+= range(0, xs.len, step).filter(s => partial or s + size <= xs.len).map(s => xs.slice(s, s + size))
+
+// `xs.chunks(n)` with the last chunk padded with `fill` to `n` elements. An empty list gives `[]`.
+pub fn chunks_padded[A](xs: List[A], n: Int where _ >= 1, fill: A) -> List[List[A]]
+  post r.all(w => w.len == n)
+= range(0, xs.len, n).map(s => pad_to(xs.slice(s, s + n), n, fill))
+
+// Groups runs of consecutive elements with the same key, each with its key (Python's
+// `itertools.groupby`, Rust's `chunk_by`). `key` is called once per element. Equal keys that
+// are not adjacent make separate runs; use `group_into` to group them all.
+pub fn chunk_by[A, K, e](xs: List[A], key: A -> K ! e) -> List[(K, List[A])] ! e
+= do
+  ks = xs.map(key)
+  cuts = (1..xs.len).filter(i => ks[i - 1] != ks[i])
+  starts = [0] + cuts
+  if xs.is_empty then [] else slices_between(xs, cuts).enumerate.map(p => (ks[starts[p.0]], p.1))
+
+// Run-length encoding: each run of equal neighbours as `(value, length)`.
+pub fn rle[A](xs: List[A]) -> List[(A, Int)]
+  ex rle(["a", "a", "b", "a"]) == [("a", 2), ("b", 1), ("a", 1)]
+= chunk_by(xs, x => x).map(p => (p.0, p.1.len))
+
+// The inverse of `rle`; counts below 1 contribute nothing.
+pub fn rle_decode[A](runs: List[(A, Int)]) -> List[A]
+= runs.flat_map(p => replicate(p.0, p.1))
+
+// Every suffix of `xs`, longest first, ending with `[]`: `xs.len + 1` lists.
+pub fn tails[A](xs: List[A]) -> List[List[A]]
+  post r.len == xs.len + 1
+= (0..xs.len + 1).map(i => xs.drop(i))
+
+// Every prefix of `xs`, shortest first, starting with `[]`: `xs.len + 1` lists.
+pub fn inits[A](xs: List[A]) -> List[List[A]]
+  post r.len == xs.len + 1
+= (0..xs.len + 1).map(i => xs.take(i))
+
+// The last `n` elements (all of them when `n >= xs.len`, none when `n <= 0`).
+pub fn take_last[A](xs: List[A], n: Int) -> List[A]
+  post r.len == clamp(n, 0, xs.len)
+= xs.drop(xs.len - clamp(n, 0, xs.len))
+
+// `xs` without its last `n` elements (`[]` when `n >= xs.len`, `xs` when `n <= 0`).
+pub fn drop_last[A](xs: List[A], n: Int) -> List[A]
+  post r.len == xs.len - clamp(n, 0, xs.len)
+= xs.take(xs.len - clamp(n, 0, xs.len))
+
+fn suffix_len[A, e](xs: List[A], p: A -> Bool ! e) -> Int ! e
+= do
+  var n = 0
+  for i in range(xs.len - 1, -1, -1)
+    if not p(xs[i]) then return n
+    n := n + 1
+  n
+
+// The longest suffix whose elements all satisfy `p`, tested from the end.
+pub fn take_last_while[A, e](xs: List[A], p: A -> Bool ! e) -> List[A] ! e
+= take_last(xs, suffix_len(xs, p))
+
+// `xs` without the longest suffix whose elements all satisfy `p` (an `rstrip` for lists).
+pub fn drop_last_while[A, e](xs: List[A], p: A -> Bool ! e) -> List[A] ! e
+= drop_last(xs, suffix_len(xs, p))
+
+// `xs` padded at the end with `fill` to at least `n` elements; longer lists are unchanged.
+pub fn pad_to[A](xs: List[A], n: Int, fill: A) -> List[A]
+  post r.len == max(xs.len, n)
+= if xs.len >= n then xs else xs + replicate(fill, n - xs.len)
+
+// `xs` padded at the front with `fill` to at least `n` elements; longer lists are unchanged.
+pub fn pad_front_to[A](xs: List[A], n: Int, fill: A) -> List[A]
+  post r.len == max(xs.len, n)
+= if xs.len >= n then xs else replicate(fill, n - xs.len) + xs
+
+// ---------- duplicates ----------
+
+// `xs` with runs of equal neighbours collapsed to their first element (Unix `uniq`). Use the
+// builtin `unique` to drop every repeat.
+pub fn dedup[A](xs: List[A]) -> List[A]
+  post r.len <= xs.len
+= (0..xs.len).filter(i => i == 0 or xs[i - 1] != xs[i]).map(i => xs[i])
+
+// `dedup` comparing keys: keeps the first element of each run of neighbours with equal keys.
+pub fn dedup_by[A, K, e](xs: List[A], key: A -> K ! e) -> List[A] ! e
+= do
+  ks = xs.map(key)
+  (0..xs.len).filter(i => i == 0 or ks[i - 1] != ks[i]).map(i => xs[i])
+
+// The first element for each distinct key, in input order (lodash's `uniqBy`). `key` is called
+// once per element.
+pub fn distinct_by[A, K, e](xs: List[A], key: A -> K ! e) -> List[A] ! e
+= do
+  ks = xs.map(key)
+  first = (0..xs.len).fold(empty_map(), (m, i) => if m.has(ks[i]) then m else m.put(ks[i], i))
+  (0..xs.len).filter(i => first.get(ks[i]) == some(i)).map(i => xs[i])
+
+// The values that occur more than once, each once, in the order of their first occurrence.
+pub fn duplicates[A](xs: List[A]) -> List[A]
+= xs.counts.filter(_.1 > 1).map(_.0)
+
+// Whether every element equals the first (true for an empty list).
+pub fn all_equal[A](xs: List[A]) -> Bool
+= match xs
+| [] => true
+| [x, ..rest] => rest.all(_ == x)
+
+// Whether no two elements are equal (true for an empty list).
+pub fn all_distinct[A](xs: List[A]) -> Bool
+= xs.to_set.len == xs.len
+
+// The only element of `xs`, or `none` when it has zero or several.
+pub fn single[A](xs: List[A]) -> Opt[A]
+= match xs
+| [x] => some(x)
+| _ => none
+
+// ---------- counting and grouping ----------
+
+// How many times each value occurs (Python's `Counter`). The builtin `counts` gives the same
+// numbers as a list in first-seen order.
+pub fn frequencies[A](xs: List[A]) -> Map[A, Int]
+= xs.fold(empty_map(), (m, x) => m.put(x, m.get(x).or(0) + 1))
+
+// How many elements have each key (lodash's `countBy`).
+pub fn count_by[A, K, e](xs: List[A], key: A -> K ! e) -> Map[K, Int] ! e
+= frequencies(xs.map(key))
+
+// How many elements satisfy `p`.
+pub fn count_where[A, e](xs: List[A], p: A -> Bool ! e) -> Int ! e
+  post r >= 0 and r <= xs.len
+= xs.fold(0, (n, x) => if p(x) then n + 1 else n)
+
+// A map from each element's key to the element (lodash's `keyBy`). When several elements share
+// a key the last one wins; use `group_into` to keep them all.
+pub fn index_by[A, K, e](xs: List[A], key: A -> K ! e) -> Map[K, A] ! e
+= xs.fold(empty_map(), (m, x) => m.put(key(x), x))
+
+// A map built from the `(key, value)` pair `f` gives for each element (Kotlin's `associate`).
+// When keys repeat the last pair wins.
+pub fn associate[A, K, V, e](xs: List[A], f: A -> (K, V) ! e) -> Map[K, V] ! e
+= xs.fold(empty_map(), (m, x) => do
+  kv = f(x)
+  m.put(kv.0, kv.1))
+
+// The elements grouped by key into a map; each group keeps input order. The builtin `group_by`
+// gives the same groups as a list in first-seen key order.
+pub fn group_into[A, K, e](xs: List[A], key: A -> K ! e) -> Map[K, List[A]] ! e
+= do
+  ks = xs.map(key)
+  groups = (0..xs.len).group_by(i => ks[i])
+  groups.fold(empty_map(), (m, g) => m.put(g.0, g.1.map(i => xs[i])))
+
+// ---------- aggregates ----------
+
+// The sum of `f` over the elements (0 for an empty list); overflow traps like `+`.
+pub fn sum_by[A, e](xs: List[A], f: A -> Int ! e) -> Int ! e
+= xs.fold(0, (acc, x) => acc + f(x))
+
+// The sum of `f` over the elements as floats (0.0 for an empty list), with Kahan-Babuska
+// compensation, so long sums of small terms lose no precision to a large running total.
+pub fn sum_by_f64[A, e](xs: List[A], f: A -> F64 ! e) -> F64 ! e
+= do
+  var s = 0.0
+  var c = 0.0
+  for x in xs
+    v = f(x)
+    t = s + v
+    c := if s.abs >= v.abs then c + (s - t + v) else c + (v - t + s)
+    s := t
+  s + c
+
+// The first element with the smallest key, or `none` for an empty list. `key` is called once
+// per element.
+pub fn min_by[A, K: Ord, e](xs: List[A], key: A -> K ! e) -> Opt[A] ! e
+= do
+  var best = none
+  var bk = none
+  for x in xs
+    k = key(x)
+    if bk is some(b) and not k < b then () else do
+      best := some(x)
+      bk := some(k)
+  best
+
+// The first element with the largest key, or `none` for an empty list. `key` is called once per
+// element.
+pub fn max_by[A, K: Ord, e](xs: List[A], key: A -> K ! e) -> Opt[A] ! e
+= do
+  var best = none
+  var bk = none
+  for x in xs
+    k = key(x)
+    if bk is some(b) and not k > b then () else do
+      best := some(x)
+      bk := some(k)
+  best
+
+// The smallest and the largest element in one pass (the first of each among equals), or
+// `none` for an empty list.
+pub fn min_max[T: Ord](xs: List[T]) -> Opt[(T, T)]
+= match xs
+| [] => none
+| [x, ..rest] => some(rest.fold((x, x), (acc, y) => (if y < acc.0 then y else acc.0, if y > acc.1 then y else acc.1)))
+
+// `min_by` and `max_by` in one pass: the first element with the smallest key and the first with
+// the largest, or `none` for an empty list.
+pub fn min_max_by[A, K: Ord, e](xs: List[A], key: A -> K ! e) -> Opt[(A, A)] ! e
+= do
+  ks = xs.map(key)
+  if xs.is_empty then none else do
+    lo = (1..xs.len).fold(0, (b, i) => if ks[i] < ks[b] then i else b)
+    hi = (1..xs.len).fold(0, (b, i) => if ks[i] > ks[b] then i else b)
+    some((xs[lo], xs[hi]))
+
+fn order_desc[K: Ord](a: K, b: K) -> Int
+= if a > b then -1 else if a < b then 1 else 0
+
+fn order_asc[K: Ord](a: K, b: K) -> Int
+= if a < b then -1 else if a > b then 1 else 0
+
+// The `k` elements with the largest keys, largest first; equal keys keep input order, so the
+// result is stable. `k <= 0` gives `[]` and `k >= xs.len` sorts the whole list.
+pub fn top_k[A, K: Ord, e](xs: List[A], k: Int, key: A -> K ! e) -> List[A] ! e
+  post r.len == clamp(k, 0, xs.len)
+= do
+  ks = xs.map(key)
+  (0..xs.len).sort_with((i, j) => order_desc(ks[i], ks[j])).take(max(k, 0)).map(i => xs[i])
+
+// The `k` elements with the smallest keys, smallest first, stable like `top_k`.
+pub fn bottom_k[A, K: Ord, e](xs: List[A], k: Int, key: A -> K ! e) -> List[A] ! e
+  post r.len == clamp(k, 0, xs.len)
+= do
+  ks = xs.map(key)
+  (0..xs.len).sort_with((i, j) => order_asc(ks[i], ks[j])).take(max(k, 0)).map(i => xs[i])
+
+// The `k` largest elements, largest first (Python's `heapq.nlargest`).
+pub fn largest[T: Ord](xs: List[T], k: Int) -> List[T]
+  post r.len == clamp(k, 0, xs.len)
+= xs.sort_with(order_desc).take(max(k, 0))
+
+// The `k` smallest elements, smallest first (Python's `heapq.nsmallest`).
+pub fn smallest[T: Ord](xs: List[T], k: Int) -> List[T]
+  post r.len == clamp(k, 0, xs.len)
+= xs.sort_with(order_asc).take(max(k, 0))
+
+// ---------- combining ----------
+
+// Alternates elements of `xs` and `ys`, starting with `xs`; the rest of the longer list follows.
+pub fn interleave[A](xs: List[A], ys: List[A]) -> List[A]
+  post r.len == xs.len + ys.len
+= do
+  m = min(xs.len, ys.len)
+  (0..m).flat_map(i => [xs[i], ys[i]]) + xs.drop(m) + ys.drop(m)
+
+// Round-robin over any number of lists: the first element of each, then the second of each,
+// skipping lists that have run out (more-itertools' `interleave_longest`).
+pub fn interleave_all[A](xss: List[List[A]]) -> List[A]
+= do
+  longest = xss.fold(0, (m, l) => max(m, l.len))
+  (0..longest).flat_map(i => xss.filter(_.len > i).map(l => l[i]))
+
+// `sep` between every two elements: `[a, sep, b, sep, c]`.
+pub fn intersperse[A](xs: List[A], sep: A) -> List[A]
+  post r.len == max(2 * xs.len - 1, 0)
+= (0..xs.len).flat_map(i => if i == 0 then [xs[0]] else [sep, xs[i]])
+
+// The lists of `xss` joined with `sep` between every two (`join` for lists of lists).
+pub fn intercalate[A](xss: List[List[A]], sep: List[A]) -> List[A]
+= (0..xss.len).flat_map(i => if i == 0 then xss[0] else sep + xss[i])
+
+// Triples of the elements at the same index, as long as the shortest list.
+pub fn zip3[A, B, C](xs: List[A], ys: List[B], zs: List[C]) -> List[(A, B, C)]
+  post r.len == min(xs.len, min(ys.len, zs.len))
+= (0..min(xs.len, min(ys.len, zs.len))).map(i => (xs[i], ys[i], zs[i]))
+
+// `f` applied to the elements at the same index, as long as the shorter list.
+pub fn zip_with[A, B, C, e](xs: List[A], ys: List[B], f: (A, B) -> C ! e) -> List[C] ! e
+= (0..min(xs.len, ys.len)).map(i => f(xs[i], ys[i]))
+
+// Pairs as long as the longer list, the shorter one padded with its fill value (Python's
+// `zip_longest`).
+pub fn zip_longest[A, B](xs: List[A], ys: List[B], fill_a: A, fill_b: B) -> List[(A, B)]
+  post r.len == max(xs.len, ys.len)
+= (0..max(xs.len, ys.len)).map(i => (xs.get(i).or(fill_a), ys.get(i).or(fill_b)))
+
+// Pairs as long as the longer list, with `none` where a list has run out.
+pub fn zip_longest_opt[A, B](xs: List[A], ys: List[B]) -> List[(Opt[A], Opt[B])]
+  post r.len == max(xs.len, ys.len)
+= (0..max(xs.len, ys.len)).map(i => (xs.get(i), ys.get(i)))
+
+// The firsts and the seconds of a list of pairs.
+pub fn unzip[A, B](ps: List[(A, B)]) -> (List[A], List[B])
+  post r.0.len == ps.len and r.1.len == ps.len
+= (ps.map(_.0), ps.map(_.1))
+
+// The three components of a list of triples.
+pub fn unzip3[A, B, C](ts: List[(A, B, C)]) -> (List[A], List[B], List[C])
+  post r.0.len == ts.len
+= (ts.map(_.0), ts.map(_.1), ts.map(_.2))
+
+// Rows become columns. Ragged input is allowed: column `i` holds element `i` of every row that
+// has one, in row order, so it is shorter than the row count when some rows are short, and there
+// are as many columns as the longest row has elements. `[]` gives `[]`.
+pub fn transpose[A](rows: List[List[A]]) -> List[List[A]]
+= do
+  width = rows.fold(0, (m, r) => max(m, r.len))
+  (0..width).map(i => rows.filter(_.len > i).map(r => r[i]))
+
+// Adjacent pairs: `[(x0, x1), (x1, x2), ...]`, empty for fewer than two elements.
+pub fn pairwise[A](xs: List[A]) -> List[(A, A)]
+  post r.len == max(xs.len - 1, 0)
+= (1..xs.len).map(i => (xs[i - 1], xs[i]))
+
+// ---------- combinatorics ----------
+
+// The most lists or pairs the combinatoric functions return: 1,000,000. Their `pre` clauses
+// reject inputs whose output would be larger, so a typo can't ask for a trillion permutations.
+pub fn combinatorics_limit() -> Int
+= 1000000
+
+fn capped_mul(a: Int, b: Int) -> Int
+= if a == 0 or b == 0 then 0 else if a > (combinatorics_limit() + 1) / b then combinatorics_limit() + 1 else min(a * b, combinatorics_limit() + 1)
+
+fn capped_perm(n: Int, k: Int) -> Int
+= if k > n then 0 else (0..k).fold(1, (acc, i) => capped_mul(acc, n - i))
+
+fn capped_comb(n: Int, k: Int) -> Int
+= if k > n then 0 else do
+  j = min(k, n - k)
+  var c = 1
+  for i in 0..j
+    c := c * (n - i) / (i + 1)
+    if c > combinatorics_limit() then return combinatorics_limit() + 1
+  c
+
+// Every pair `(x, y)` with `x` from `xs` and `y` from `ys`, `x` varying slowest. At most
+// `combinatorics_limit()` pairs.
+pub fn cartesian[A, B](xs: List[A], ys: List[B]) -> List[(A, B)]
+  pre capped_mul(xs.len, ys.len) <= combinatorics_limit()
+  post r.len == xs.len * ys.len
+= xs.flat_map(x => ys.map(y => (x, y)))
+
+// The n-ary cartesian product (Python's `itertools.product`): every list taking one element from
+// each list of `xss`, the last varying fastest. `[]` gives `[[]]`, and any empty list gives `[]`.
+// At most `combinatorics_limit()` lists.
+pub fn cartesian_all[A](xss: List[List[A]]) -> List[List[A]]
+  pre xss.fold(1, (acc, l) => capped_mul(acc, l.len)) <= combinatorics_limit()
+= xss.fold([[]], (acc, l) => acc.flat_map(p => l.map(x => p.push(x))))
+
+// The `k`-permutations of `xs` by position, in lexicographic order of positions (Python's
+// `itertools.permutations(xs, k)`): `n! / (n - k)!` lists, `[[]]` for `k == 0` and `[]` for
+// `k > xs.len`. Equal elements are treated as distinct. At most `combinatorics_limit()` lists.
+pub fn permutations[A](xs: List[A], k: Int where _ >= 0) -> List[List[A]]
+  pre capped_perm(xs.len, k) <= combinatorics_limit()
+  post r.len == capped_perm(xs.len, k)
+= do
+  n = xs.len
+  idx = if k > n then [] else (0..k).fold([[]], (level, _j) => level.flat_map(p => (0..n).filter(i => not p.contains(i)).map(i => p.push(i))))
+  idx.map(p => p.map(i => xs[i]))
+
+// The `k`-combinations of `xs` by position, in lexicographic order of positions, each in input
+// order (Python's `itertools.combinations`): `C(n, k)` lists, `[[]]` for `k == 0` and `[]` for
+// `k > xs.len`. At most `combinatorics_limit()` lists.
+pub fn combinations[A](xs: List[A], k: Int where _ >= 0) -> List[List[A]]
+  pre capped_comb(xs.len, k) <= combinatorics_limit()
+  post r.len == capped_comb(xs.len, k)
+= do
+  n = xs.len
+  idx = if k > n then [] else (0..k).fold([[]], (level, j) => level.flat_map(p => (p.last.map(_ + 1).or(0)..n - k + j + 1).map(i => p.push(i))))
+  idx.map(p => p.map(i => xs[i]))
+
+// The `k`-combinations with repetition (Python's `combinations_with_replacement`): `C(n + k - 1,
+// k)` lists in lexicographic order of positions; `[[]]` for `k == 0`, `[]` for an empty `xs`
+// and `k > 0`. At most `combinatorics_limit()` lists.
+pub fn combinations_with_replacement[A](xs: List[A], k: Int where _ >= 0) -> List[List[A]]
+  pre k == 0 or capped_comb(xs.len + k - 1, k) <= combinatorics_limit()
+  ex combinations_with_replacement([1, 2], 2) == [[1, 1], [1, 2], [2, 2]]
+= do
+  n = xs.len
+  idx = (0..k).fold([[]], (level, _j) => level.flat_map(p => (p.last.or(0)..n).map(i => p.push(i))))
+  idx.map(p => p.map(i => xs[i]))
+
+// Every sublist of `xs` (keeping input order), by size and then lexicographically by position:
+// `2 ** xs.len` lists, starting with `[]`. At most 20 elements (1,048,576 lists).
+pub fn power_set[A](xs: List[A]) -> List[List[A]]
+  pre xs.len <= 20
+  post r.len == 2 ** xs.len
+= (0..xs.len + 1).flat_map(k => combinations(xs, k))
+
+fn big_count(n: Int, k: Int, comb: Bool) -> Opt[Int]
+= if k < 0 or n < 0 then none else if k > n then some(0) else do
+  j = if comb then min(k, n - k) else k
+  var c = big(1)
+  for i in 0..j
+    c := if comb then c.mul(big(n - i)).div(big(i + 1)) else c.mul(big(n - i))
+  c.to_int
+
+// The number of `k`-permutations of `n` items, `n! / (n - k)!` (0 when `k > n`), or `none` when
+// it doesn't fit in an `Int` or an argument is negative.
+pub fn count_permutations(n: Int, k: Int) -> Opt[Int]
+  ex count_permutations(5, 2) == some(20)
+= big_count(n, k, false)
+
+// The number of `k`-combinations of `n` items, the binomial coefficient (0 when `k > n`), or
+// `none` when it doesn't fit in an `Int` or an argument is negative.
+pub fn count_combinations(n: Int, k: Int) -> Opt[Int]
+  ex count_combinations(5, 2) == some(10)
+= big_count(n, k, true)
+
+// ---------- building ----------
+
+// A list of `n` copies of `x` (`[]` when `n <= 0`).
+pub fn replicate[A](x: A, n: Int) -> List[A]
+  post r.len == max(n, 0)
+= (0..max(n, 0)).map(_i => x)
+
+// `xs` repeated `n` times (`[]` when `n <= 0`).
+pub fn cycle[A](xs: List[A], n: Int) -> List[A]
+  post r.len == xs.len * max(n, 0)
+= (0..max(n, 0)).flat_map(_i => xs)
+
+// The first `n` elements of `xs` repeated forever (`[]` when `xs` is empty or `n <= 0`).
+pub fn cycle_take[A](xs: List[A], n: Int) -> List[A]
+= if xs.is_empty then [] else (0..max(n, 0)).map(i => xs[i % xs.len])
+
+// `f(i, x)` for each element and its index.
+pub fn map_indexed[A, B, e](xs: List[A], f: (Int, A) -> B ! e) -> List[B] ! e
+= (0..xs.len).map(i => f(i, xs[i]))
+
+// The elements for which `p(i, x)` holds, with `i` the index.
+pub fn filter_indexed[A, e](xs: List[A], p: (Int, A) -> Bool ! e) -> List[A] ! e
+= (0..xs.len).filter(i => p(i, xs[i])).map(i => xs[i])
+
+// The values of `f` that are `some`, in order (Rust's `filter_map`).
+pub fn filter_map[A, B, e](xs: List[A], f: A -> Opt[B] ! e) -> List[B] ! e
+= compact(xs.map(f))
+
+// The values inside the `some`s, in order.
+pub fn compact[A](xs: List[Opt[A]]) -> List[A]
+  post r.len <= xs.len
+= xs.flat_map(o => do
+  match o
+  | some(v) => [v]
+  | none => [])
+
+// The first `some` that `f` gives, calling `f` only until then (Rust's `find_map`).
+pub fn find_map[A, B, e](xs: List[A], f: A -> Opt[B] ! e) -> Opt[B] ! e
+= do
+  for x in xs
+    r = f(x)
+    if r.is_some then return r
+  none
+
+// The `ok` values and the `err` values of `f`, each in order.
+pub fn partition_map[A, B, C, e](xs: List[A], f: A -> Res[B, C] ! e) -> (List[B], List[C]) ! e
+= partition_results(xs.map(f))
+
+// The `ok` values and the `err` values, each in order.
+pub fn partition_results[B, C](rs: List[Res[B, C]]) -> (List[B], List[C])
+  post r.0.len + r.1.len == rs.len
+= (rs.flat_map(x => do
+  match x
+  | ok(v) => [v]
+  | err(_) => []), rs.flat_map(x => do
+  match x
+  | ok(_) => []
+  | err(e) => [e]))
+
+// `some` of every value when all are `some`, else `none`.
+pub fn sequence_opt[A](xs: List[Opt[A]]) -> Opt[List[A]]
+= if xs.all(_.is_some) then some(compact(xs)) else none
+
+// `ok` of every value when all are `ok`, else the first `err`.
+pub fn sequence_res[A, E](rs: List[Res[A, E]]) -> Res[List[A], E]
+= do
+  for x in rs
+    if x is err(e) then return err(e)
+  ok(partition_results(rs).0)
+
+// ---------- index edits (total) ----------
+
+// The element at `i`, counting from the end when `i` is negative (`-1` is the last), or `none`
+// when out of range.
+pub fn at[A](xs: List[A], i: Int) -> Opt[A]
+= if i < 0 then xs.get(xs.len + i) else xs.get(i)
+
+// `xs` with `x` inserted before index `i`; `i` is clamped to `0..=xs.len`, so a negative `i`
+// inserts at the front and one past the end appends.
+pub fn insert_at[A](xs: List[A], i: Int, x: A) -> List[A]
+  post r.len == xs.len + 1
+= insert_all_at(xs, i, [x])
+
+// `xs` with all of `ys` inserted before index `i`, clamped like `insert_at`.
+pub fn insert_all_at[A](xs: List[A], i: Int, ys: List[A]) -> List[A]
+  post r.len == xs.len + ys.len
+= do
+  k = clamp(i, 0, xs.len)
+  xs.take(k) + ys + xs.drop(k)
+
+// `xs` without the element at `i`; an out-of-range `i` (negative included) leaves it unchanged.
+pub fn remove_at[A](xs: List[A], i: Int) -> List[A]
+= if i < 0 or i >= xs.len then xs else xs.take(i) + xs.drop(i + 1)
+
+// `xs` without the first element equal to `x` (unchanged when there is none). The builtin
+// `filter` removes them all.
+pub fn remove_first[A](xs: List[A], x: A) -> List[A]
+= match xs.index_of(x)
+| some(i) => remove_at(xs, i)
+| none => xs
+
+// `xs` with the element at `i` replaced by `x`; out of range leaves it unchanged.
+pub fn set_at[A](xs: List[A], i: Int, x: A) -> List[A]
+  post r.len == xs.len
+= if i < 0 or i >= xs.len then xs else xs.take(i) + [x] + xs.drop(i + 1)
+
+// `xs` with the element at `i` replaced by `f` of it; out of range leaves it unchanged and
+// doesn't call `f`.
+pub fn update_at[A, e](xs: List[A], i: Int, f: A -> A ! e) -> List[A] ! e
+= if i < 0 or i >= xs.len then xs else xs.take(i) + [f(xs[i])] + xs.drop(i + 1)
+
+// `xs` with the elements at `i` and `j` exchanged; unchanged when either is out of range.
+pub fn swap[A](xs: List[A], i: Int, j: Int) -> List[A]
+  post r.len == xs.len
+= if i < 0 or j < 0 or i >= xs.len or j >= xs.len then xs else set_at(set_at(xs, i, xs[j]), j, xs[i])
+
+// `xs` with the element at `from` moved so that it ends at index `to` (clamped to the valid
+// range); unchanged when `from` is out of range.
+pub fn move_item[A](xs: List[A], from: Int, to: Int) -> List[A]
+  post r.len == xs.len
+= if from < 0 or from >= xs.len then xs else insert_at(remove_at(xs, from), to, xs[from])
+
+// ---------- searching ----------
+
+// The last element satisfying `p`, testing from the end.
+pub fn find_last[A, e](xs: List[A], p: A -> Bool ! e) -> Opt[A] ! e
+= find_last_index(xs, p).map(i => xs[i])
+
+// The index of the last element satisfying `p`, testing from the end.
+pub fn find_last_index[A, e](xs: List[A], p: A -> Bool ! e) -> Opt[Int] ! e
+= do
+  for i in range(xs.len - 1, -1, -1)
+    if p(xs[i]) then return some(i)
+  none
+
+// The index of the last element equal to `x`.
+pub fn last_index_of[A](xs: List[A], x: A) -> Opt[Int]
+= find_last_index(xs, _ == x)
+
+// The indexes of every element satisfying `p`, ascending.
+pub fn indices_where[A, e](xs: List[A], p: A -> Bool ! e) -> List[Int] ! e
+= (0..xs.len).filter(i => p(xs[i]))
+
+// The indexes of every element equal to `x`, ascending.
+pub fn indices_of[A](xs: List[A], x: A) -> List[Int]
+= (0..xs.len).filter(i => xs[i] == x)
+
+fn bisect[e](n: Int, before: Int -> Bool ! e) -> Int ! e
+= do
+  var lo = 0
+  var hi = n
+  for _step in 0..64
+    if lo < hi then do
+      mid = lo + (hi - lo) / 2
+      if before(mid) then lo := mid + 1 else hi := mid
+  lo
+
+// The first index at which `p` is false, for a list that is partitioned (every element
+// satisfying `p` comes before every one that doesn't); `xs.len` when `p` holds everywhere.
+// Binary search: `p` is called O(log n) times.
+pub fn partition_point[A, e](xs: List[A], p: A -> Bool ! e) -> Int ! e
+  post r >= 0 and r <= xs.len
+= bisect(xs.len, i => p(xs[i]))
+
+// The first index whose key is at least `target`, in a list sorted by `key` (`xs.len` if none).
+pub fn lower_bound_by[A, K: Ord, e](xs: List[A], key: A -> K ! e, target: K) -> Int ! e
+  post r >= 0 and r <= xs.len
+= bisect(xs.len, i => key(xs[i]) < target)
+
+// The first index whose key is greater than `target`, in a list sorted by `key` (`xs.len` if
+// none).
+pub fn upper_bound_by[A, K: Ord, e](xs: List[A], key: A -> K ! e, target: K) -> Int ! e
+  post r >= 0 and r <= xs.len
+= bisect(xs.len, i => not key(xs[i]) > target)
+
+// The first index whose key equals `target` in a list sorted by `key`, or `none`.
+pub fn binary_search_by[A, K: Ord, e](xs: List[A], key: A -> K ! e, target: K) -> Opt[Int] ! e
+= do
+  i = lower_bound_by(xs, key, target)
+  if i < xs.len and not key(xs[i]) > target then some(i) else none
+
+// `x` inserted into the sorted list `xs` after any equal elements, so the list stays sorted and
+// insertion is stable.
+pub fn insert_sorted[T: Ord](xs: List[T], x: T) -> List[T]
+  post r.len == xs.len + 1
+= insert_at(xs, bisect(xs.len, i => not xs[i] > x), x)
+
+// `x` inserted into `xs`, sorted by `key`, after any elements with an equal key.
+pub fn insert_sorted_by[A, K: Ord, e](xs: List[A], x: A, key: A -> K ! e) -> List[A] ! e
+= do
+  kx = key(x)
+  insert_at(xs, upper_bound_by(xs, key, kx), x)
+
+fn sub_at[A](xs: List[A], sub: List[A], i: Int) -> Bool
+= do
+  for j in 0..sub.len
+    if xs[i + j] != sub[j] then return false
+  true
+
+fn sub_starts[A](xs: List[A], sub: List[A]) -> List[Int]
+= (0..max(xs.len - sub.len + 1, 0)).filter(i => sub_at(xs, sub, i))
+
+// The first index at which `sub` occurs in `xs` as a contiguous run; `some(0)` for an empty
+// `sub`. Worst case O(xs.len * sub.len).
+pub fn index_of_sublist[A](xs: List[A], sub: List[A]) -> Opt[Int]
+= do
+  for i in 0..max(xs.len - sub.len + 1, 0)
+    if sub_at(xs, sub, i) then return some(i)
+  none
+
+// The last index at which `sub` occurs in `xs`; `some(xs.len)` for an empty `sub`.
+pub fn last_index_of_sublist[A](xs: List[A], sub: List[A]) -> Opt[Int]
+= do
+  for i in range(xs.len - sub.len, -1, -1)
+    if sub_at(xs, sub, i) then return some(i)
+  none
+
+// Whether `sub` occurs in `xs` as a contiguous run (always for an empty `sub`).
+pub fn contains_sublist[A](xs: List[A], sub: List[A]) -> Bool
+= index_of_sublist(xs, sub).is_some
+
+// Whether `xs` starts with `prefix`.
+pub fn has_prefix[A](xs: List[A], prefix: List[A]) -> Bool
+= prefix.len <= xs.len and xs.take(prefix.len) == prefix
+
+// Whether `xs` ends with `suffix`.
+pub fn has_suffix[A](xs: List[A], suffix: List[A]) -> Bool
+= suffix.len <= xs.len and xs.drop(xs.len - suffix.len) == suffix
+
+fn non_overlapping(starts: List[Int], width: Int) -> List[Int]
+= do
+  picked = starts.scan((-1, false), (st, s) => if s >= st.0 then (s + width, true) else (st.0, false))
+  (0..starts.len).filter(i => picked[i].1).map(i => starts[i])
+
+// How many times `sub` occurs in `xs` without overlapping, scanning left to right (like
+// `Str.count` in Python). An empty `sub` counts `xs.len + 1` times.
+pub fn count_sublist[A](xs: List[A], sub: List[A]) -> Int
+  post r >= 0
+= if sub.is_empty then xs.len + 1 else non_overlapping(sub_starts(xs, sub), sub.len).len
+
+// `xs` with every non-overlapping occurrence of `sub` (left to right) replaced by `by`. An empty
+// `sub` leaves `xs` unchanged.
+pub fn replace_sublist[A](xs: List[A], sub: List[A], by: List[A]) -> List[A]
+= if sub.is_empty then xs else do
+  starts = non_overlapping(sub_starts(xs, sub), sub.len)
+  ends = [0] + starts.map(_ + sub.len)
+  (0..starts.len + 1).flat_map(j => if j < starts.len then xs.slice(ends[j], starts[j]) + by else xs.drop(ends[j]))
+
+// ---------- folds ----------
+
+// Folds from the right: `f(x0, f(x1, ... f(xn, init)))`.
+pub fn fold_right[A, B, e](xs: List[A], init: B, f: (A, B) -> B ! e) -> B ! e
+= do
+  var acc = init
+  for i in range(xs.len - 1, -1, -1)
+    acc := f(xs[i], acc)
+  acc
+
+// Folds from the left with the first element as the start, or `none` for an empty list.
+pub fn reduce[A, e](xs: List[A], f: (A, A) -> A ! e) -> Opt[A] ! e
+= match xs
+| [] => none
+| [x, ..rest] => some(rest.fold(x, f))
+
+// Folds from the right with the last element as the start, or `none` for an empty list.
+pub fn reduce_right[A, e](xs: List[A], f: (A, A) -> A ! e) -> Opt[A] ! e
+= match xs
+| [] => none
+| [..init, z] => some(fold_right(init, z, f))
+
+// The accumulators of `fold_right`, aligned with the elements: element `i` of the result is
+// `f(xs[i], result[i + 1])`, the last one `f(xs[n - 1], init)`. Same length as `xs`, like the
+// builtin `scan`.
+pub fn scan_right[A, B, e](xs: List[A], init: B, f: (A, B) -> B ! e) -> List[B] ! e
+  post r.len == xs.len
+= xs.reverse.scan(init, (acc, x) => f(x, acc)).reverse
+
+// ---------- order ----------
+
+// Whether every element is at most the next one.
+pub fn is_sorted[T: Ord](xs: List[T]) -> Bool
+= (1..xs.len).all(i => not xs[i - 1] > xs[i])
+
+// Whether every element is less than the next one (sorted, no repeats).
+pub fn is_strictly_sorted[T: Ord](xs: List[T]) -> Bool
+= (1..xs.len).all(i => xs[i - 1] < xs[i])
+
+// Whether the keys never decrease. `key` is called once per element.
+pub fn is_sorted_by[A, K: Ord, e](xs: List[A], key: A -> K ! e) -> Bool ! e
+= is_sorted(xs.map(key))
+
+// Whether `cmp(a, b) <= 0` for every pair of neighbours, with a comparator like `sort_with`'s.
+pub fn is_sorted_with[A, e](xs: List[A], cmp: (A, A) -> Int ! e) -> Bool ! e
+= do
+  for i in 1..xs.len
+    if cmp(xs[i - 1], xs[i]) > 0 then return false
+  true
+
+// The indexes that sort `xs` (stable: equal elements keep input order), NumPy's `argsort`.
+// `argsort(xs).map(i => xs[i])` is `xs` sorted.
+pub fn argsort[T: Ord](xs: List[T]) -> List[Int]
+  post r.len == xs.len
+= (0..xs.len).sort_with((i, j) => order_asc(xs[i], xs[j]))
+
+// The indexes that sort `xs` by `key`, stable. `key` is called once per element.
+pub fn argsort_by[A, K: Ord, e](xs: List[A], key: A -> K ! e) -> List[Int] ! e
+= argsort(xs.map(key))
+
+// The 0-based position of each element in the stable sort (ordinal ranks: ties get consecutive
+// ranks in input order). The inverse permutation of `argsort`.
+pub fn ranks[T: Ord](xs: List[T]) -> List[Int]
+  post r.len == xs.len
+= do
+  order = argsort(xs)
+  pos = (0..order.len).fold(empty_map(), (m, k) => m.put(order[k], k))
+  (0..xs.len).map(i => pos.get(i).or(0))
+
+// Dense ranks: 0 for the smallest value, and one more for each larger distinct value; equal
+// elements share a rank.
+pub fn dense_ranks[T: Ord](xs: List[T]) -> List[Int]
+  post r.len == xs.len
+= do
+  distinct = xs.unique.sort_with(order_asc)
+  (0..xs.len).map(i => bisect(distinct.len, j => distinct[j] < xs[i]))
+
+// Lexicographic comparison by the elements' `Ord`: -1, 0 or 1. A proper prefix comes first.
+pub fn compare_lists[T: Ord](xs: List[T], ys: List[T]) -> Int
+  post r >= -1 and r <= 1
+= do
+  for i in 0..min(xs.len, ys.len)
+    c = order_asc(xs[i], ys[i])
+    if c != 0 then return c
+  order_asc(xs.len, ys.len)
+
+// The elements of the sorted lists `xs` and `ys` in one sorted list, by `key`; on equal keys
+// elements of `xs` come first. The builtin `merge` does this for the elements themselves.
+pub fn merge_by[A, K: Ord, e](xs: List[A], ys: List[A], key: A -> K ! e) -> List[A] ! e
+= do
+  all = xs + ys
+  ks = all.map(key)
+  (0..all.len).sort_with((i, j) => order_asc(ks[i], ks[j])).map(i => all[i])
+
+// A k-way merge: every element of the lists in one sorted list, stable (on equals, earlier
+// lists first). With sorted inputs this is the merge; any input gives a sorted result.
+pub fn merge_all[T: Ord](xss: List[List[T]]) -> List[T]
+  post r.len == xss.fold(0, (n, l) => n + l.len)
+= xss.flatten.sort_with(order_asc)
+
+// ---------- set operations (distinct results, first-seen order) ----------
+
+// The distinct elements of `xs` and then of `ys` that are not in `xs`, each once, in first-seen
+// order.
+pub fn union[A](xs: List[A], ys: List[A]) -> List[A]
+= (xs + ys).unique
+
+// The distinct elements of `xs` that also occur in `ys`, in `xs` order.
+pub fn intersect[A](xs: List[A], ys: List[A]) -> List[A]
+= do
+  s = ys.to_set
+  xs.unique.filter(x => s.has(x))
+
+// The distinct elements of `xs` that don't occur in `ys`, in `xs` order.
+pub fn difference[A](xs: List[A], ys: List[A]) -> List[A]
+= do
+  s = ys.to_set
+  xs.unique.filter(x => not s.has(x))
+
+// The distinct elements in exactly one of the lists: those of `xs` first, then those of `ys`.
+pub fn sym_difference[A](xs: List[A], ys: List[A]) -> List[A]
+= difference(xs, ys) + difference(ys, xs)
+
+// Whether every element of `ys` occurs in `xs` (true for an empty `ys`).
+pub fn contains_all[A](xs: List[A], ys: List[A]) -> Bool
+= do
+  s = xs.to_set
+  ys.all(y => s.has(y))
+
+// Whether some element of `ys` occurs in `xs` (false for an empty `ys`).
+pub fn contains_any[A](xs: List[A], ys: List[A]) -> Bool
+= do
+  s = xs.to_set
+  ys.any(y => s.has(y))
+
+// Whether the lists have no element in common.
+pub fn is_disjoint[A](xs: List[A], ys: List[A]) -> Bool
+= not contains_any(xs, ys)
+
+fn occurrence[A](xs: List[A]) -> List[Int]
+= do
+  seen = xs.scan(empty_map(), (m, x) => m.put(x, m.get(x).or(0) + 1))
+  (0..xs.len).map(i => seen[i].get(xs[i]).or(1) - 1)
+
+// The multiset intersection, keeping duplicates: each value as many times as it occurs in both
+// lists (the smaller count), in `xs` order.
+pub fn multi_intersect[A](xs: List[A], ys: List[A]) -> List[A]
+= do
+  cy = frequencies(ys)
+  occ = occurrence(xs)
+  (0..xs.len).filter(i => occ[i] < cy.get(xs[i]).or(0)).map(i => xs[i])
+
+// The multiset difference: `xs` with one occurrence removed for each occurrence in `ys`, the
+// earliest first (Python's `Counter` subtraction, keeping order).
+pub fn multi_difference[A](xs: List[A], ys: List[A]) -> List[A]
+= do
+  cy = frequencies(ys)
+  occ = occurrence(xs)
+  (0..xs.len).filter(i => occ[i] >= cy.get(xs[i]).or(0)).map(i => xs[i])
+
+// The multiset union: all of `xs`, then the occurrences in `ys` beyond those in `xs` (each value
+// as many times as the larger count).
+pub fn multi_union[A](xs: List[A], ys: List[A]) -> List[A]
+= xs + multi_difference(ys, xs)
+
+// Whether `ys` is a permutation of `xs`: the same elements with the same counts.
+pub fn is_permutation[A](xs: List[A], ys: List[A]) -> Bool
+= xs.len == ys.len and frequencies(xs) == frequencies(ys)
+
+// ---------- random ----------
+
+// `k` distinct positions of `xs` chosen uniformly at random, in random order (Python's
+// `random.sample`), as a pure function of `seed` like the builtin `shuffle`. `k` is clamped to
+// `0..=xs.len`.
+pub fn sample[A](xs: List[A], k: Int, seed: Int) -> List[A]
+  post r.len == clamp(k, 0, xs.len)
+= xs.shuffle(seed).take(clamp(k, 0, xs.len))
+
+// `sample`, with the chosen elements in their input order.
+pub fn sample_ordered[A](xs: List[A], k: Int, seed: Int) -> List[A]
+  post r.len == clamp(k, 0, xs.len)
+= (0..xs.len).shuffle(seed).take(clamp(k, 0, xs.len)).sort.map(i => xs[i])
+
+// ---------- tests ----------
+
+fn big_n() -> Int
+= 100000
+
+fn noisy_pos(x: Int) -> Bool ! log
+= do
+  log("saw {x}")
+  x > 0
+
+test split_at_bounds = split_at([1, 2, 3], 1) == ([1], [2, 3]) and split_at([1, 2, 3], -4) == ([], [1, 2, 3]) and split_at([1, 2, 3], 9) == ([1, 2, 3], []) and split_at([], 0) == ([], [])
+
+test split_while_until = split_while([1, 2, 5, 1], _ < 3) == ([1, 2], [5, 1]) and split_until([1, 2, 5, 1], _ > 3) == ([1, 2], [5, 1]) and split_while([], _ > 0) == ([], []) and split_until([1, 2], _ > 5) == ([1, 2], [])
+
+fn calls_of_split_while() -> (List[Int], Int)
+= do
+  var calls = 0
+  r = handle split_while([1, 2, -1, 3, 4], noisy_pos)
+  | log(m) => do
+    calls := calls + 1
+    resume()
+  (r.0, calls)
+
+test split_while_calls_until_first_failure = calls_of_split_while() == ([1, 2], 3)
+
+test split_when_runs = split_when([1, 2, 4, 5, 7], (a, b) => b != a + 1) == [[1, 2], [4, 5], [7]] and split_when([], (a, b) => a != b) == [] and split_when([1], (a, b) => true) == [[1]]
+
+test split_on_like_str_split = split_on([1, 0, 2, 0, 0, 3, 0], 0) == [[1], [2], [], [3], []] and split_on([], 0) == [[]] and split_on([0], 0) == [[], []] and split_on(["a", "b"], "x") == [["a", "b"]]
+
+test split_where_pred = split_where([1, -1, 2, 3, -5], _ < 0) == [[1], [2, 3], []] and split_where(["héllo", " ", "wörld"], _ == " ") == [["héllo"], ["wörld"]]
+
+test split_parts_even = split_parts([1, 2, 3, 4, 5, 6, 7], 3) == [[1, 2, 3], [4, 5], [6, 7]] and split_parts([1, 2], 4) == [[1], [2], [], []] and split_parts([], 2) == [[], []] and split_parts([1, 2], 1) == [[1, 2]]
+
+test sliding_full_and_partial = sliding([1, 2, 3, 4, 5], 3, 1, false) == [[1, 2, 3], [2, 3, 4], [3, 4, 5]] and sliding([1, 2, 3, 4, 5], 3, 1, true) == [[1, 2, 3], [2, 3, 4], [3, 4, 5], [4, 5], [5]] and sliding([1, 2, 3, 4, 5], 2, 3, false) == [[1, 2], [4, 5]] and sliding([1, 2, 3, 4, 5], 2, 3, true) == [[1, 2], [4, 5]] and sliding([1, 2, 3], 5, 1, false) == [] and sliding([], 2, 1, true) == []
+
+test sliding_matches_builtins = sliding([1, 2, 3, 4, 5], 2, 1, false) == [1, 2, 3, 4, 5].windows(2) and sliding([1, 2, 3, 4, 5], 2, 2, true) == [1, 2, 3, 4, 5].chunks(2)
+
+test chunks_padded_last = chunks_padded([1, 2, 3, 4, 5], 2, 0) == [[1, 2], [3, 4], [5, 0]] and chunks_padded([1, 2], 2, 0) == [[1, 2]] and chunks_padded([], 3, 0) == []
+
+test chunk_by_runs = chunk_by(["ant", "ape", "bee", "asp"], s => s.take(1)) == [("a", ["ant", "ape"]), ("b", ["bee"]), ("a", ["asp"])] and chunk_by([], x => x) == []
+
+test rle_round_trip = rle([1, 1, 1, 2, 1]) == [(1, 3), (2, 1), (1, 1)] and rle_decode(rle([1, 1, 1, 2, 1])) == [1, 1, 1, 2, 1] and rle([]) == [] and rle_decode([("x", 0), ("y", -2), ("z", 2)]) == ["z", "z"]
+
+test tails_inits = tails([1, 2]) == [[1, 2], [2], []] and inits([1, 2]) == [[], [1], [1, 2]] and tails([]) == [[]] and inits([]) == [[]]
+
+test take_drop_last = take_last([1, 2, 3], 2) == [2, 3] and take_last([1, 2, 3], 9) == [1, 2, 3] and take_last([1, 2, 3], -1) == [] and drop_last([1, 2, 3], 1) == [1, 2] and drop_last([1, 2, 3], 5) == [] and drop_last([1, 2, 3], -2) == [1, 2, 3]
+
+test last_while = take_last_while([1, 5, 2, 3], _ < 4) == [2, 3] and drop_last_while([1, 5, 0, 0], _ == 0) == [1, 5] and drop_last_while([0, 0], _ == 0) == [] and take_last_while([], _ == 0) == []
+
+test padding = pad_to([1], 3, 0) == [1, 0, 0] and pad_to([1, 2, 3], 2, 0) == [1, 2, 3] and pad_front_to(["b"], 3, "a") == ["a", "a", "b"] and pad_to([], -1, 0) == []
+
+test dedup_runs = dedup([1, 1, 2, 2, 2, 1, 3, 3]) == [1, 2, 1, 3] and dedup([]) == [] and dedup_by(["Ab", "aC", "b", "a"], s => s.lower.take(1)) == ["Ab", "b", "a"]
+
+test distinct_by_first_wins = distinct_by(["apple", "avocado", "banana", "blueberry", "cherry"], s => s.take(1)) == ["apple", "banana", "cherry"] and distinct_by([], x => x) == [] and distinct_by([3, -3, 2, -2, 3], x => x.abs) == [3, 2]
+
+test duplicate_values = duplicates([3, 1, 3, 2, 1, 3]) == [3, 1] and duplicates([1, 2]) == [] and duplicates([]) == []
+
+test equality_checks = all_equal([]) and all_equal([2, 2, 2]) and not all_equal([2, 3]) and all_distinct([1, 2, 3]) and not all_distinct([1, 2, 1]) and all_distinct([])
+
+test single_only = single([7]) == some(7) and single([]) == none and single([1, 2]) == none
+
+test frequencies_map = frequencies(["a", "b", "a"]) == empty_map().put("a", 2).put("b", 1) and frequencies([]).len == 0
+
+test count_by_key = count_by(["one", "two", "three"], _.len) == empty_map().put(3, 2).put(5, 1) and count_where([1, -2, 3], _ > 0) == 2 and count_where([], _ > 0) == 0
+
+test index_by_last_wins = index_by([(1, "a"), (2, "b"), (1, "c")], _.0) == empty_map().put(1, (1, "c")).put(2, (2, "b")) and associate(["a", "bb", "cc"], s => (s.len, s)) == empty_map().put(1, "a").put(2, "cc")
+
+test group_into_keeps_order = group_into([1, 2, 3, 4, 5], _ % 2) == empty_map().put(1, [1, 3, 5]).put(0, [2, 4]) and group_into([], x => x).len == 0
+
+test sums = sum_by([(1, "a"), (2, "b")], _.0) == 3 and sum_by([], x => x) == 0 and sum_by_f64([], x => x) == 0.0 and sum_by_f64([1.0, 1e100, 1.0, -1e100], x => x) == 2.0 and sum_by_f64([0.1, 0.2, 0.3], x => x) == 0.6
+
+test min_max_by_first_tie = min_by(["bb", "a", "c"], _.len) == some("a") and max_by(["bb", "a", "cc"], _.len) == some("bb") and min_by([], x => x) == none and max_by([], x => x) == none
+
+test min_max_one_pass = min_max([3, 1, 4, 1, 5]) == some((1, 5)) and min_max([]) == none and min_max(["b"]) == some(("b", "b")) and min_max_by(["bb", "a", "ccc", "d"], _.len) == some(("a", "ccc")) and min_max_by([], x => x) == none
+
+test top_bottom_stable = top_k([("a", 2), ("b", 3), ("c", 2), ("d", 1)], 3, _.1) == [("b", 3), ("a", 2), ("c", 2)] and bottom_k([("a", 2), ("b", 3), ("c", 2), ("d", 1)], 2, _.1) == [("d", 1), ("a", 2)] and top_k([1, 2], 0, x => x) == [] and top_k([1, 2], -3, x => x) == [] and bottom_k([1, 2], 10, x => x) == [1, 2]
+
+test largest_smallest = largest([5, 1, 9, 3], 2) == [9, 5] and smallest([5, 1, 9, 3], 3) == [1, 3, 5] and largest([], 3) == [] and smallest([2], -1) == []
+
+test interleaving = interleave([1, 2, 3], [10, 20]) == [1, 10, 2, 20, 3] and interleave([], [1]) == [1] and interleave_all([[1, 2, 3], [], [10], [20, 30]]) == [1, 10, 20, 2, 30, 3] and interleave_all([]) == []
+
+test intersperse_intercalate = intersperse([1, 2, 3], 0) == [1, 0, 2, 0, 3] and intersperse([], 0) == [] and intersperse([1], 0) == [1] and intercalate([[1, 2], [3], []], [0, 0]) == [1, 2, 0, 0, 3, 0, 0] and intercalate([], [0]) == []
+
+test zips = zip3([1, 2, 3], ["a", "b"], [true, false, true]) == [(1, "a", true), (2, "b", false)] and zip_with([1, 2, 3], [10, 20], (a, b) => a + b) == [11, 22] and zip_with([], [1], (a, b) => b) == []
+
+test zip_longest_fills = zip_longest([1, 2, 3], ["a"], 0, "-") == [(1, "a"), (2, "-"), (3, "-")] and zip_longest_opt([1], ["a", "b"]) == [(some(1), some("a")), (none, some("b"))] and zip_longest([], [], 0, 0) == []
+
+test unzips = unzip([(1, "a"), (2, "b")]) == ([1, 2], ["a", "b"]) and unzip([]) == ([], []) and unzip3([(1, "a", true)]) == ([1], ["a"], [true])
+
+test transpose_ragged = transpose([[1, 2, 3], [4, 5, 6]]) == [[1, 4], [2, 5], [3, 6]] and transpose([[1, 2, 3], [4], [5, 6]]) == [[1, 4, 5], [2, 6], [3]] and transpose([]) == [] and transpose([[], []]) == [] and transpose(transpose([[1, 2], [3, 4]])) == [[1, 2], [3, 4]]
+
+test pairwise_neighbours = pairwise([1, 2, 3]) == [(1, 2), (2, 3)] and pairwise([1]) == [] and pairwise([]) == []
+
+test cartesian_products = cartesian([1, 2], ["a", "b"]) == [(1, "a"), (1, "b"), (2, "a"), (2, "b")] and cartesian([], [1]) == [] and cartesian_all([[1, 2], [3], [4, 5]]) == [[1, 3, 4], [1, 3, 5], [2, 3, 4], [2, 3, 5]] and cartesian_all([]) == [[]] and cartesian_all([[1], []]) == []
+
+test cartesian_limit_size = cartesian((0..1000).map(i => i), (0..1000).map(i => i)).len == combinatorics_limit()
+
+test permutations_order = permutations([1, 2, 3], 2) == [[1, 2], [1, 3], [2, 1], [2, 3], [3, 1], [3, 2]] and permutations([1, 2, 3], 3).len == 6 and permutations([1, 2], 0) == [[]] and permutations([1, 2], 3) == [] and permutations([], 0) == [[]] and permutations(["a", "a"], 2) == [["a", "a"], ["a", "a"]]
+
+test combinations_order = combinations([1, 2, 3, 4], 2) == [[1, 2], [1, 3], [1, 4], [2, 3], [2, 4], [3, 4]] and combinations([1, 2], 0) == [[]] and combinations([1, 2], 3) == [] and combinations([1, 2, 3], 3) == [[1, 2, 3]] and combinations((0..30).map(i => i), 29).len == 30
+
+test combinations_repeat = combinations_with_replacement([1, 2, 3], 2) == [[1, 1], [1, 2], [1, 3], [2, 2], [2, 3], [3, 3]] and combinations_with_replacement([], 2) == [] and combinations_with_replacement([], 0) == [[]] and combinations_with_replacement([1], 3) == [[1, 1, 1]]
+
+test power_sets = power_set([1, 2, 3]) == [[], [1], [2], [3], [1, 2], [1, 3], [2, 3], [1, 2, 3]] and power_set([]) == [[]] and power_set((0..16).map(i => i)).len == 65536
+
+test counting = count_permutations(10, 3) == some(720) and count_permutations(3, 5) == some(0) and count_combinations(52, 5) == some(2598960) and count_combinations(100, 50) == none and count_combinations(-1, 2) == none and count_combinations(67, 33) == none and count_combinations(60, 30) == some(118264581564861424) and count_permutations(30, 30) == none
+
+test building = replicate("x", 3) == ["x", "x", "x"] and replicate(1, 0) == [] and replicate(1, -5) == [] and cycle([1, 2], 2) == [1, 2, 1, 2] and cycle([1], -1) == [] and cycle_take([1, 2, 3], 5) == [1, 2, 3, 1, 2] and cycle_take([], 4) == [] and cycle_take([1], -2) == []
+
+test indexed = map_indexed(["a", "b"], (i, s) => "{i}{s}") == ["0a", "1b"] and filter_indexed([5, 6, 7, 8], (i, x) => i % 2 == 0) == [5, 7] and map_indexed([], (i, x) => i) == []
+
+test options = filter_map(["1", "x", "3"], _.to_int) == [1, 3] and compact([some(1), none, some(2)]) == [1, 2] and find_map(["x", "2", "3"], _.to_int) == some(2) and find_map([], s => some(s)) == none and sequence_opt([some(1), some(2)]) == some([1, 2]) and sequence_opt([some(1), none]) == none and sequence_opt([]) == some([])
+
+test results = partition_results([ok(1), err("a"), ok(2)]) == ([1, 2], ["a"]) and sequence_res([ok(1), ok(2)]) == ok([1, 2]) and sequence_res([ok(1), err("e1"), err("e2")]) == err("e1") and sequence_res([]) == ok([])
+
+test partition_map_split = partition_map([1, -2, 3], x => if x > 0 then ok(x) else err(x)) == ([1, 3], [-2])
+
+test negative_at = at([1, 2, 3], 0) == some(1) and at([1, 2, 3], -1) == some(3) and at([1, 2, 3], -3) == some(1) and at([1, 2, 3], -4) == none and at([1, 2, 3], 3) == none and at([], 0) == none
+
+test inserts_clamp = insert_at([1, 2], 1, 9) == [1, 9, 2] and insert_at([1, 2], -5, 9) == [9, 1, 2] and insert_at([1, 2], 7, 9) == [1, 2, 9] and insert_at([], 0, 1) == [1] and insert_all_at([1, 4], 1, [2, 3]) == [1, 2, 3, 4]
+
+test removes_total = remove_at([1, 2, 3], 1) == [1, 3] and remove_at([1, 2, 3], 3) == [1, 2, 3] and remove_at([1, 2, 3], -1) == [1, 2, 3] and remove_first([1, 2, 1], 1) == [2, 1] and remove_first([1], 5) == [1]
+
+test updates_total = set_at([1, 2, 3], 2, 0) == [1, 2, 0] and set_at([1], 1, 0) == [1] and update_at([1, 2], 0, _ * 10) == [10, 2] and update_at([1, 2], 5, _ * 10) == [1, 2] and update_at([], -1, x => x) == []
+
+test swaps_moves = swap([1, 2, 3], 0, 2) == [3, 2, 1] and swap([1, 2, 3], 0, 3) == [1, 2, 3] and swap([1, 2, 3], 1, 1) == [1, 2, 3] and move_item(["a", "b", "c", "d"], 0, 2) == ["b", "c", "a", "d"] and move_item(["a", "b", "c"], 2, 0) == ["c", "a", "b"] and move_item(["a", "b"], 0, 99) == ["b", "a"] and move_item(["a"], 4, 0) == ["a"]
+
+test find_from_end = find_last([1, 4, 2, 5], _ % 2 == 0) == some(2) and find_last([], _ > 0) == none and find_last_index([1, 4, 2, 5], _ > 3) == some(3) and last_index_of([1, 2, 1], 1) == some(2) and last_index_of([1], 3) == none
+
+test index_lists = indices_where([1, -1, 2, -2], _ < 0) == [1, 3] and indices_of(["a", "b", "a"], "a") == [0, 2] and indices_of([], 1) == []
+
+test partition_points = partition_point([1, 2, 3, 10, 11], _ < 5) == 3 and partition_point([], _ < 5) == 0 and partition_point([1, 2], _ < 5) == 2 and partition_point([7, 8], _ < 5) == 0
+
+test bounds_by_key = lower_bound_by([(1, "a"), (3, "b"), (3, "c"), (5, "d")], _.0, 3) == 1 and upper_bound_by([(1, "a"), (3, "b"), (3, "c"), (5, "d")], _.0, 3) == 3 and lower_bound_by([(1, "a")], _.0, 9) == 1 and upper_bound_by([], x => x, 0) == 0
+
+test binary_search_key = binary_search_by([(1, "a"), (3, "b"), (3, "c"), (5, "d")], _.0, 3) == some(1) and binary_search_by([(1, "a"), (5, "d")], _.0, 3) == none and binary_search_by([], x => x, 3) == none
+
+test sorted_inserts = insert_sorted([1, 3, 5], 4) == [1, 3, 4, 5] and insert_sorted([], 1) == [1] and insert_sorted([1, 1], 1) == [1, 1, 1] and insert_sorted_by([(1, "a"), (2, "b")], (1, "z"), _.0) == [(1, "a"), (1, "z"), (2, "b")]
+
+test sublists = index_of_sublist([1, 2, 3, 2, 3], [2, 3]) == some(1) and last_index_of_sublist([1, 2, 3, 2, 3], [2, 3]) == some(3) and index_of_sublist([1, 2], []) == some(0) and last_index_of_sublist([1, 2], []) == some(2) and index_of_sublist([1], [1, 2]) == none and last_index_of_sublist([], [1]) == none and contains_sublist([1, 2, 3], [2, 3]) and not contains_sublist([1, 2, 3], [3, 2])
+
+test prefixes_suffixes = has_prefix([1, 2, 3], [1, 2]) and has_prefix([1], []) and not has_prefix([1], [1, 2]) and has_suffix([1, 2, 3], [2, 3]) and not has_suffix([1, 2, 3], [1]) and has_suffix([], [])
+
+test count_and_replace = count_sublist([1, 1, 1, 1], [1, 1]) == 2 and count_sublist([1, 2], []) == 3 and count_sublist([], [1]) == 0 and replace_sublist([1, 1, 1, 2], [1, 1], [9]) == [9, 1, 2] and replace_sublist([1, 2, 1, 2], [1, 2], []) == [] and replace_sublist([1, 2], [], [0]) == [1, 2] and replace_sublist([3], [1], [0]) == [3]
+
+test right_folds = fold_right([1, 2, 3], [], (x, acc) => acc.push(x)) == [3, 2, 1] and fold_right([], 5, (x, acc) => x + acc) == 5 and reduce([1, 2, 3], (a, b) => a - b) == some(-4) and reduce_right([1, 2, 3], (a, b) => a - b) == some(2) and reduce([], (a, b) => a + b) == none and reduce_right([], (a, b) => a + b) == none
+
+test right_scan = scan_right([1, 2, 3], 0, (x, acc) => x + acc) == [6, 5, 3] and scan_right([], 0, (x, acc) => x + acc) == [] and [1, 2, 3].scan(0, (a, x) => a + x) == [1, 3, 6]
+
+test sortedness = is_sorted([1, 1, 2]) and not is_sorted([2, 1]) and is_sorted([]) and is_strictly_sorted([1, 2, 3]) and not is_strictly_sorted([1, 1]) and is_sorted_by(["a", "bb", "cc"], _.len) and is_sorted_with([3, 2, 2], (a, b) => b - a) and not is_sorted_with([1, 2], (a, b) => b - a)
+
+test argsorts = argsort([30, 10, 20, 10]) == [1, 3, 2, 0] and argsort([]) == [] and argsort_by(["ccc", "a", "bb"], _.len) == [1, 2, 0] and argsort([3, 1, 2]).map(i => [3, 1, 2][i]) == [1, 2, 3]
+
+test ranking = ranks([30, 10, 20, 10]) == [3, 0, 2, 1] and dense_ranks([30, 10, 20, 10]) == [2, 0, 1, 0] and ranks([]) == [] and dense_ranks(["b", "a", "b"]) == [1, 0, 1]
+
+test lexicographic = compare_lists([1, 2], [1, 3]) == -1 and compare_lists([1, 2], [1, 2]) == 0 and compare_lists([1, 2], [1]) == 1 and compare_lists([], [1]) == -1 and compare_lists(["b"], ["a", "z"]) == 1
+
+test merges = merge_by([(1, "x"), (3, "x")], [(1, "y"), (2, "y")], _.0) == [(1, "x"), (1, "y"), (2, "y"), (3, "x")] and merge_all([[1, 4, 7], [2, 5], [], [3, 6]]) == [1, 2, 3, 4, 5, 6, 7] and merge_all([]) == [] and merge_by([], [], x => x) == []
+
+test set_operations = union([1, 2, 2], [3, 1]) == [1, 2, 3] and intersect([3, 1, 2, 1], [1, 3]) == [3, 1] and difference([1, 2, 3, 2], [2]) == [1, 3] and sym_difference([1, 2, 3], [3, 4]) == [1, 2, 4] and union([], []) == [] and intersect([1], []) == []
+
+test membership = contains_all([1, 2, 3], [3, 1]) and contains_all([1], []) and not contains_all([1], [2]) and contains_any([1, 2], [5, 2]) and not contains_any([1], []) and is_disjoint([1, 2], [3]) and not is_disjoint([1], [1])
+
+test multisets = multi_intersect([1, 1, 2, 3, 1], [1, 3, 1]) == [1, 1, 3] and multi_difference([1, 2, 1, 3, 1], [1, 1]) == [2, 3, 1] and multi_union([1, 1, 2], [1, 2, 2, 3]) == [1, 1, 2, 2, 3] and multi_difference([], [1]) == [] and is_permutation([1, 2, 1], [1, 1, 2]) and not is_permutation([1, 2], [1, 1])
+
+test sampling = sample([1, 2, 3, 4, 5], 3, 42).len == 3 and all_distinct(sample([1, 2, 3, 4, 5], 5, 7)) and is_permutation(sample([1, 2, 3, 4, 5], 9, 7), [1, 2, 3, 4, 5]) and sample([1, 2], -1, 1) == [] and sample([1, 2, 3], 2, 9) == sample([1, 2, 3], 2, 9) and sample([], 2, 1) == []
+
+test sampling_ordered = is_sorted(sample_ordered((0..50).map(i => i), 10, 3)) and sample_ordered([1, 2, 3], 3, 5) == [1, 2, 3] and sample_ordered([1, 2, 3], 0, 5) == []
+
+test unicode_elements = dedup(["é", "é", "ß", "日本", "日本"]) == ["é", "ß", "日本"] and split_on("a😀b😀".chars, "😀") == [["a"], ["b"], []] and frequencies("ééa".chars).get("é") == some(2)
+
+test huge_lists = do
+  xs = (0..big_n()).map(i => i % 1000)
+  dedup(xs).len == big_n() and distinct_by(xs, x => x).len == 1000 and sliding(xs, 10, 10, false).len == big_n() / 10 and split_parts(xs, 7).fold(0, (n, p) => n + p.len) == big_n() and is_sorted(merge_all(split_parts(xs.sort, 4))) and frequencies(xs).get(5) == some(100) and top_k(xs, 3, x => x) == [999, 999, 999] and partition_point(xs.sort, _ < 500) == 50000 and interleave(xs, xs).len == 2 * big_n() and transpose([xs, xs]).len == big_n() and remove_at(xs, 50000).len == big_n() - 1 and index_of_sublist(xs, [998, 999, 0]) == some(998) and union(xs, xs).len == 1000 and multi_difference(xs, xs).len == 0
+
+type Desc = {n: Int} derive Eq, Show
+
+impl Ord for Desc
+  fn cmp(a: Desc, b: Desc) -> Int
+  = b.n - a.n
+
+fn descs(ns: List[Int]) -> List[Desc]
+= ns.map(n => Desc{n})
+
+test custom_ord_is_used = is_sorted(descs([3, 2, 2, 1])) and not is_sorted(descs([1, 2])) and dense_ranks(descs([1, 3, 2, 3])) == [2, 0, 1, 0] and largest(descs([1, 3, 2]), 1) == descs([1]) and merge_all([descs([5, 1]), descs([4, 2])]) == descs([5, 4, 2, 1]) and compare_lists(descs([2]), descs([1])) == -1 and min_max(descs([1, 3, 2])) == some((Desc{n: 3}, Desc{n: 1}))

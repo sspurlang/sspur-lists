@@ -1,0 +1,5 @@
+[package]
+name = "lists"
+version = "0.1.0"
+description = "List utilities beyond the builtins: windows, splits, grouping, zips, set operations, combinatorics, searching and safe index edits"
+license = "MIT"
